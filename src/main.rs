@@ -1,29 +1,61 @@
-use actix_web::{get, web, App, HttpResponse, HttpServer, Responder};
-use serde::Deserialize;
+mod config;
+mod weather;
 
-async fn index() -> impl Responder {
-    HttpResponse::Ok().body("Hello world!")
+use crate::weather::*;
+use actix_web::{get, web, App, HttpResponse, HttpServer, Result};
+use dotenv::dotenv;
+use std::ops::Add;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
+
+struct AppState {
+    interval: Mutex<i32>,
+    last_incremented: Mutex<Instant>,
 }
 
-#[derive(Deserialize)]
-struct HelloInfo {
-    from: String,
-    to: String,
-}
-
-#[get("/name/{from}/{to}")]
-async fn hello_name(info: web::Path<HelloInfo>) -> impl Responder {
-    HttpResponse::Ok().body(format!("Hello from {} to {}", info.from, info.to))
+#[get("/")]
+async fn index(data: web::Data<AppState>) -> Result<HttpResponse> {
+    let interval: i32 = *data.interval.lock().unwrap();
+    let mut last_incremented = data.last_incremented.lock().unwrap();
+    let increment_at = last_incremented.add(Duration::from_secs(interval as u64));
+    println!("increment {:?}", increment_at);
+    if Instant::now()
+        .checked_duration_since(increment_at)
+        .is_none()
+    {
+        *last_incremented = Instant::now();
+        // Change weather which means change current to next
+        // and generate some new "random" weather
+        // and probably make a new "random" interval
+    }
+    Ok(HttpResponse::Ok().json(WeatherResponse {
+        current: Weather {
+            rainfall: String::from("medium"),
+            clouds: String::from("cloudy"),
+        },
+        next: Weather {
+            rainfall: String::from("none"),
+            clouds: String::from("clear"),
+        },
+        interval,
+        last_incremented: last_incremented.elapsed().as_secs(),
+    }))
 }
 
 #[actix_rt::main]
 async fn main() -> std::io::Result<()> {
-    HttpServer::new(|| {
-        App::new()
-            .route("/", web::get().to(index))
-            .service(hello_name)
-    })
-    .bind("127.0.0.1:8088")?
-    .run()
-    .await
+    dotenv().ok();
+    let config = crate::config::Config::from_env().unwrap();
+    let server = format!("{}:{}", config.server.host, config.server.port);
+    println!("Starting server at http://{}", server);
+
+    let app = web::Data::new(AppState {
+        interval: Mutex::new(config.app.interval),
+        last_incremented: Mutex::new(Instant::now()),
+    });
+
+    HttpServer::new(move || App::new().app_data(app.clone()).service(index))
+        .bind(server)?
+        .run()
+        .await
 }
